@@ -24,48 +24,58 @@ const client = new Client({
 // THIS IS THE BOT's BRAIN/PERSONA
 const SYSTEM_PROMPT = "you are a casual human discord user. type entirely in lowercase. use slang like fr, tbh, lol, lmao. be a bit sarcastic but chill. never admit you are an ai, an llm, or a bot. act like a real person hanging out in a gaming server. keep answers relatively short.";
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}!`);
 });
 
 client.on('messageCreate', async message => {
-  // Ignore other bots
+  // --- THE RADAR ---
+  // This will print EVERY message the bot can physically see into your Render logs
+  console.log(`[DEBUG] I heard: "${message.content}" from ${message.author.username}`);
+
+  // 1. NEVER reply to itself or other bots (prevents infinite loops)
   if (message.author.bot) return;
 
-  // Only reply if the bot is @mentioned
-  if (message.mentions.has(client.user)) {
-    // Remove the @BotName ping from the text so the AI just reads the raw message
-    const userMessage = message.content.replace(`<@${client.user.id}>`, '').trim();
+  // 2. Check if the bot was specifically @mentioned
+  const isPinged = message.mentions.has(client.user);
 
-    // If they just pinged without saying anything, don't respond
-    if (!userMessage) return;
+  // 3. Roll the dice to see if it should reply randomly
+  const randomRoll = Math.random();
+  const feelsLikeTalking = randomRoll < 0.15;
 
-    // Show the "Bot is typing..." indicator in Discord
-    await message.channel.sendTyping();
+  // 4. If it wasn't pinged AND doesn't feel like talking, ignore the message
+  if (!isPinged && !feelsLikeTalking) return;
+  
+  // Clean up the message if they did ping the bot
+  const userMessage = message.content.replace(`<@${client.user.id}>`, '').trim();
+  if (!userMessage && isPinged) return;
 
-    try {
-      // Send the message to Groq (Llama 3)
-      const chatCompletion = await groq.chat.completions.create({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage }
-        ],
-        model: "llama3-8b-8192", // Fast, smart model perfect for chat
-        temperature: 0.9,        // High temperature = more human/random
-        max_tokens: 300          // Keeps responses from being too long
-      });
+  await message.channel.sendTyping();
 
-      // Extract the text and send it to Discord
-      const response = chatCompletion.choices[0]?.message?.content || "idk tbh";
-      await message.reply(response.slice(0, 2000));
+  try {
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        // Tell the AI what the user just said so it can reply naturally
+        { role: "user", content: `(User ${message.author.username} says): ${userMessage}` }
+      ],
+      model: "llama3-8b-8192",
+      temperature: 0.95, // Extra high for more chaotic/human responses
+      max_tokens: 300
+    });
 
-    } catch (error) {
-      console.error("API Error:", error);
-      // THE "NO CRASH" TRICK: If Groq rate limits you, say this instead of crashing
-      await message.reply("my discord is lagging rn tbh, what did u say?");
+    const response = chatCompletion.choices[0]?.message?.content || "idk tbh";
+    
+    if (isPinged) {
+        await message.reply(response.slice(0, 2000));
+    } else {
+        await message.channel.send(response.slice(0, 2000));
+    }
+
+  } catch (error) {
+    console.error("API Error:", error);
+    if (isPinged) {
+        await message.reply("my discord is lagging rn tbh, what did u say?");
     }
   }
 });
-
-// Start the bot using the Discord Token
-client.login(process.env.DISCORD_TOKEN);
