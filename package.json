@@ -1,0 +1,14 @@
+{
+  "name": "llama-discord-bot",
+  "version": "1.0.0",
+  "description": "Casual AI Discord bot using Groq and Llama 3",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "express": "^4.18.2",
+    "groq-sdk": "^0.5.0"
+  }
+}
