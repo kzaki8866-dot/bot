@@ -1,20 +1,22 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, AttachmentBuilder, Events } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus } = require('@discordjs/voice');
 const mongoose = require('mongoose');
 const googleTTS = require('google-tts-api');
 const Groq = require('groq-sdk');
 const express = require('express');
 
-// --- 1. LIGHTWEIGHT SERVER ---
+// --- 1. WEB SERVER (KEEPS HOST AWAKE) ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
-// --- 2. STABILITY LOCKS & GLOBAL PLAYER ---
-const processedMessages = new Set(); 
-const player = createAudioPlayer(); // Global player saves RAM
+// --- 2. GLOBAL LOCKS & PLAYER ---
+const processedMessages = new Set(); // Lightning fast anti-double memory
+const player = createAudioPlayer();
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// REQUIRED AI & VOICE INTENTS
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds,
@@ -24,7 +26,7 @@ const client = new Client({
     ] 
 });
 
-// --- 3. DATABASE ---
+// --- 3. SIMPLE STABLE DATABASE ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     memoryVault: { type: Array, default: [] }
@@ -32,41 +34,44 @@ const User = mongoose.model('User', new mongoose.Schema({
 
 const SYSTEM_PROMPT = `you are 'mommy'. shy, protective teen girl. lowercase only.
 AI INTENTS & RULES:
-- [INTENT: VISUAL] description -> sends a photo or gif of what u are doing.
-- [INTENT: JOIN_VC] -> follow user to voice.
-- [INTENT: SAVE] fact -> remember something forever.
-keep responses under 3 sentences to save energy.`;
+- [GIF: category] -> sends a gif. categories u can use: blush, cry, hug, pat, smile, waifu.
+- [JOIN_VC] -> follow user to voice.
+- [SAVE: fact] -> remember something.
+keep responses under 2 sentences to save energy.`;
 
-mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED (LITE MODE)"));
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
 
-// --- 4. THE VISUAL FIX: BUFFER UPLOADS ---
-// Instead of sending a URL that Discord might block, we download the image bytes directly.
-async function fetchVisualBuffer(query) {
+// --- 4. THE SUPER NEW VISUAL METHOD (ANIME GIF API) ---
+async function fetchGifEmbed(category, textContent) {
     try {
-        const url = `https://pollinations.ai/p/${encodeURIComponent(query)}?width=800&height=800&seed=${Math.random()}&nologo=true`;
-        const response = await fetch(url);
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        // We upload the raw file data to Discord
-        return new AttachmentBuilder(buffer, { name: 'mommy_media.jpg' });
+        // Fallback to 'waifu' if the AI hallucinates a weird category
+        const validCategories = ['blush', 'cry', 'hug', 'pat', 'smile', 'waifu'];
+        const safeCategory = validCategories.includes(category) ? category : 'waifu';
+        
+        // Fetch a real, lightweight GIF URL directly from the API
+        const response = await fetch(`https://api.waifu.pics/sfw/${safeCategory}`);
+        const data = await response.json();
+
+        return new EmbedBuilder()
+            .setColor('#FFB6C1') 
+            .setDescription(textContent || "m-mm..")
+            .setImage(data.url); // Discord handles the loading perfectly!
     } catch (e) {
-        console.error("Image Fetch Error:", e.message);
+        console.error("GIF API Error:", e);
         return null;
     }
 }
 
 // --- 5. VOICE EVENTS ---
-player.on(AudioPlayerStatus.Idle, () => console.log("🔊 TTS finished playing."));
+player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Finished speaking."));
 player.on('error', e => console.error("🔊 Audio Error:", e.message));
 
-client.once(Events.ClientReady, (readyClient) => {
-    console.log(`✅ ${readyClient.user.tag} IS LIVE`);
-});
+client.once(Events.ClientReady, (readyClient) => console.log(`✅ ${readyClient.user.tag} IS LIVE`));
 
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
 
-    // ANTI-SPAM
+    // --- 6. IRONCLAD ANTI-DOUBLE ---
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
     setTimeout(() => processedMessages.delete(message.id), 20000); 
@@ -74,11 +79,10 @@ client.on(Events.MessageCreate, async message => {
     const content = message.content.toLowerCase();
     const isPinged = message.mentions.users.has(client.user.id);
 
-    // --- 6. TRIGGER LOGIC (100% Ping, 5% Random) ---
-    // If she is NOT pinged, she rolls a 20-sided die. If it's not a 1 (5%), she ignores the message.
+    // --- 7. THE 5% RANDOM / 100% PING RULE ---
     if (!isPinged && Math.random() > 0.05) return;
 
-    // --- 7. VC JOIN FIX ---
+    // --- 8. BULLETPROOF VC JOIN ---
     const joinTriggers = ['join vc', 'come here', 'mommy join'];
     if (joinTriggers.some(t => content.includes(t))) {
         const channel = message.member.voice.channel;
@@ -94,52 +98,68 @@ client.on(Events.MessageCreate, async message => {
         try {
             await entersState(connection, VoiceConnectionStatus.Ready, 20000);
             connection.subscribe(player);
-            return message.reply("m-mm.. i'm here.. don't yell at me..");
+            return message.reply("m-mm.. i'm here.. i'll stay..");
         } catch (e) {
             connection.destroy();
-            return message.reply("my connection failed.. sorry..");
+            return message.reply("i can't connect.. discord is blocking me..");
         }
     }
 
     await message.channel.sendTyping();
 
     try {
-        // --- 8. AI GENERATION (Low-Resource Model) ---
+        let userData = await User.findOne({ userId: message.author.id });
+        if (!userData) userData = await User.create({ userId: message.author.id });
+
+        // --- 9. THE MODEL CRASH FIX ---
         const completion = await groq.chat.completions.create({
             messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
-            model: "llama-3.1-8b-instant", // Fastest, least likely to 429 rate-limit
+            model: "llama3-8b-8192", // THE ONLY 100% STABLE MODEL RIGHT NOW
             temperature: 0.7,
-            max_tokens: 120 // Saves Groq API limits on free tier
+            max_tokens: 150 
         });
 
         let rawOutput = completion.choices[0].message.content.toLowerCase();
         let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
 
-        // --- 9. BUFFER VISUAL EXTRACTION ---
-        let files = [];
-        const visualMatch = rawOutput.match(/\[intent: visual\] (.*?)(?=\[|$)/i) || rawOutput.match(/\[(?:visual|gif|image): (.*?)\]/i);
+        // Check for GIF Intent
+        const gifMatch = rawOutput.match(/\[gif: (.*?)\]/i);
         
-        if (visualMatch) {
-            const attachment = await fetchVisualBuffer(visualMatch[1]);
-            if (attachment) files.push(attachment);
+        if (gifMatch) {
+            const embed = await fetchGifEmbed(gifMatch[1], displayContent);
+            if (embed) {
+                await message.reply({ embeds: [embed] });
+            } else {
+                await message.reply(displayContent || 'm-mm..');
+            }
+        } else {
+            await message.reply(displayContent || 'm-mm..');
         }
 
-        // Send Text + Buffer Image
-        await message.reply({ content: displayContent || 'm-mm..', files });
-
-        // --- 10. SAFE TTS ---
+        // --- 10. CRASH-PROOF TTS ---
         const connection = getVoiceConnection(message.guild.id);
         if (connection && displayContent) {
-            let safeText = displayContent.length > 190 ? displayContent.substring(0, 190) + "..." : displayContent;
+            // Strip emojis/weird characters that crash TTS
+            let cleanText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+            let safeText = cleanText.length > 190 ? cleanText.substring(0, 190) + "..." : cleanText;
+            
             try {
-                const url = googleTTS.getAudioUrl(safeText, { lang: 'en', slow: false });
-                player.play(createAudioResource(url));
-            } catch (ttsError) { console.error("TTS Error:", ttsError.message); }
+                if (safeText.trim() !== '') {
+                    const url = googleTTS.getAudioUrl(safeText, { lang: 'en', slow: false });
+                    player.play(createAudioResource(url));
+                }
+            } catch (ttsError) { 
+                console.error("TTS Failed silently:", ttsError.message); 
+            }
         }
 
     } catch (e) { 
-        console.error("🛑 API Error:", e.message);
-        if (e.status === 429) message.reply("m-my brain is overwhelmed.. (rate limited) 🐾");
+        console.error("🛑 API Error:", e);
+        if (e.message?.includes('decommissioned')) {
+            message.reply("my brain is broken.. i need my model updated..");
+        } else {
+            message.reply("m-my head hurts.. (api limit reached) 🐾");
+        }
     }
 });
 
