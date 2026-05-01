@@ -1,16 +1,17 @@
 {
-  "name": "mommy-ai-ultimate",
-  "version": "11.0.0",
-  "description": "Stable AI with Waifu API",
+  "name": "mommy-ai-voice-fix",
+  "version": "12.0.0",
+  "description": "Custom FFmpeg Pipeline",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node --no-warnings index.js"
   },
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
     "google-tts-api": "^2.0.2",
     "groq-sdk": "^0.5.0",
     "libsodium-wrappers": "^0.7.13",

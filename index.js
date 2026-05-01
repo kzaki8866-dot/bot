@@ -1,18 +1,26 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const mongoose = require('mongoose');
 const googleTTS = require('google-tts-api');
 const Groq = require('groq-sdk');
 const express = require('express');
+const ffmpegPath = require('ffmpeg-static'); // THE MISSING ENGINE
 
 // --- 1. WEB SERVER ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
-// --- 2. GLOBAL LOCKS & PLAYER ---
+// --- 2. GLOBAL LOCKS & RESILIENT PLAYER ---
 const processedMessages = new Set(); 
-const player = createAudioPlayer(); // 100x Better: Global player stays alive forever
+
+// New Player Method: Tells the player to keep playing even if the stream lags
+const player = createAudioPlayer({
+    behaviors: {
+        noSubscriber: NoSubscriberBehavior.Play,
+        maxMissedFrames: 250, // Prevents drops on bad internet
+    },
+});
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const client = new Client({ 
@@ -24,22 +32,20 @@ const client = new Client({
     ] 
 });
 
-// --- 3. DATABASE ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     memoryVault: { type: Array, default: [] }
 }));
 
 const SYSTEM_PROMPT = `you are 'mommy'. shy, protective teen girl. lowercase only.
-AI INTENTS & RULES:
-- [GIF: category] -> sends a gif. categories: blush, cry, hug, pat, smile, waifu.
+AI INTENTS:
+- [GIF: category] -> sends a gif. (blush, cry, hug, pat, smile, waifu)
 - [JOIN_VC] -> follow user to voice.
-- [SAVE: fact] -> remember something.
 keep responses short to save energy.`;
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
 
-// --- 4. GIF API (Crash-Proof Visuals) ---
+// GIF API
 async function fetchGifEmbed(category, textContent) {
     try {
         const validCategories = ['blush', 'cry', 'hug', 'pat', 'smile', 'waifu'];
@@ -56,16 +62,16 @@ async function fetchGifEmbed(category, textContent) {
     }
 }
 
-// --- 5. VOICE EVENTS ---
-player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Finished speaking."));
-player.on('error', e => console.error("🔊 Audio Error:", e.message));
+// --- 3. UPGRADED VOICE EVENTS ---
+player.on(AudioPlayerStatus.Playing, () => console.log("🔊 Mommy is actively speaking!"));
+player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Mommy went quiet."));
+player.on('error', e => console.error("🔊 Audio Stream Crash:", e.message));
 
 client.once(Events.ClientReady, (readyClient) => console.log(`✅ ${readyClient.user.tag} IS LIVE`));
 
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
 
-    // --- ANTI-DOUBLE SET ---
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
     setTimeout(() => processedMessages.delete(message.id), 20000); 
@@ -73,10 +79,9 @@ client.on(Events.MessageCreate, async message => {
     const content = message.content.toLowerCase();
     const isPinged = message.mentions.users.has(client.user.id);
 
-    // --- 5% RANDOM / 100% PING ---
     if (!isPinged && Math.random() > 0.05) return;
 
-    // --- VC JOIN ---
+    // --- 4. THE NEW VC API PIPELINE ---
     const joinTriggers = ['join vc', 'come here', 'mommy join'];
     if (joinTriggers.some(t => content.includes(t))) {
         const channel = message.member.voice.channel;
@@ -89,20 +94,33 @@ client.on(Events.MessageCreate, async message => {
             selfDeaf: false,
         });
 
+        // Track network state changes to prevent invisible drops
+        connection.on(VoiceConnectionStatus.Disconnected, async () => {
+            try {
+                await Promise.race([
+                    entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+                    entersState(connection, VoiceConnectionStatus.Connecting, 5000),
+                ]);
+                console.log("🔄 Reconnected to VC automatically.");
+            } catch (error) {
+                console.log("❌ VC Dropped completely. Destroying connection.");
+                connection.destroy();
+            }
+        });
+
         try {
             await entersState(connection, VoiceConnectionStatus.Ready, 20000);
             connection.subscribe(player);
             return message.reply("m-mm.. i'm here.. i'll stay..");
         } catch (e) {
             connection.destroy();
-            return message.reply("i can't connect.. discord is blocking me..");
+            return message.reply("my network is too weak to join.. discord blocked me..");
         }
     }
 
     await message.channel.sendTyping();
 
     try {
-        // --- GROQ API FIX (100% ACTIVE 2026 MODEL) ---
         const completion = await groq.chat.completions.create({
             messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
             model: "llama-3.1-8b-instant",
@@ -113,38 +131,41 @@ client.on(Events.MessageCreate, async message => {
         let rawOutput = completion.choices[0].message.content.toLowerCase();
         let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
 
-        // --- VISUALS ---
+        // Visuals
         const gifMatch = rawOutput.match(/\[gif: (.*?)\]/i);
         if (gifMatch) {
             const embed = await fetchGifEmbed(gifMatch[1], displayContent);
-            if (embed) {
-                await message.reply({ embeds: [embed] });
-            } else {
-                await message.reply(displayContent || 'm-mm..');
-            }
+            if (embed) await message.reply({ embeds: [embed] });
+            else await message.reply(displayContent || 'm-mm..');
         } else {
             await message.reply(displayContent || 'm-mm..');
         }
 
-        // --- NORMAL GOOGLE TTS (UPGRADED SAFELY) ---
+        // --- 5. THE NEW AUDIO RESOURCE BUILDER ---
         const connection = getVoiceConnection(message.guild.id);
         if (connection && displayContent) {
-            // We use the exact TTS from the start, but enforce a safe length limit so it NEVER crashes
-            let safeText = displayContent.substring(0, 190);
+            let cleanText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+            let safeText = cleanText.substring(0, 190);
             
             if (safeText.trim() !== '') {
                 const url = googleTTS.getAudioUrl(safeText, { lang: 'en', slow: false });
-                player.play(createAudioResource(url));
+                
+                // We explicitly create an inline volume resource. 
+                // This forces Discord to recognize it as a valid, live audio stream.
+                const resource = createAudioResource(url, {
+                    inlineVolume: true,
+                    inputType: null // Lets FFmpeg automatically detect and transcode the MP3
+                });
+                
+                resource.volume.setVolume(1.0);
+                player.play(resource);
             }
         }
 
     } catch (e) { 
         console.error("🛑 API Error:", e.message);
-        if (e.status === 429) {
-            message.reply("m-my head hurts.. (api limit reached) 🐾");
-        } else {
-            message.reply("m-mm.. a system error happened..");
-        }
+        if (e.status === 429) message.reply("m-my head hurts.. (api limit) 🐾");
+        else message.reply("m-mm.. a system error happened..");
     }
 });
 
