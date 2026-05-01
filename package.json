@@ -1,7 +1,7 @@
 {
-  "name": "llama-human-entity-v5",
-  "version": "5.0.0",
-  "description": "Elite Human AI with Visuals and Anti-Spam",
+  "name": "llama-human-entity-final",
+  "version": "6.0.0",
+  "description": "DAVE-Compliant AI Entity",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -15,7 +15,6 @@
     "groq-sdk": "^0.5.0",
     "libsodium-wrappers": "^0.7.13",
     "mongoose": "^8.3.2",
-    "opusscript": "^0.0.8",
-    "axios": "^1.6.0"
+    "opusscript": "^0.0.8"
   }
 }
