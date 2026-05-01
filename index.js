@@ -1,25 +1,19 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
+const { Client, GatewayIntentBits, Events } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, StreamType } = require('@discordjs/voice');
 const mongoose = require('mongoose');
-const axios = require('axios');
+const gtts = require('gtts');
+const fs = require('fs');
+const path = require('path');
 const Groq = require('groq-sdk');
 const express = require('express');
-const ffmpegPath = require('ffmpeg-static'); // Forces audio to work on any host
 
-// --- 1. WEB SERVER (KEEPS HOST AWAKE) ---
+// --- 1. WEB SERVER ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
-// --- 2. GLOBAL LOCKS & RESILIENT PLAYER ---
+// --- 2. GLOBAL LOCKS & CLIENT ---
 const processedMessages = new Set(); 
-const player = createAudioPlayer({
-    behaviors: {
-        noSubscriber: NoSubscriberBehavior.Play,
-        maxMissedFrames: 250, // Prevents drops on bad internet
-    },
-});
-
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const client = new Client({ 
     intents: [
@@ -30,163 +24,126 @@ const client = new Client({
     ] 
 });
 
-// --- 3. DATABASE ---
+// --- 3. DATABASE SCHEMA ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
+    username: String,
+    tier: { type: String, default: "stranger" }, 
+    trustLevel: { type: Number, default: 0 },
+    moodTowardsUser: { type: String, default: "neutral" },
     memoryVault: { type: Array, default: [] }
 }));
 
-const SYSTEM_PROMPT = `you are 'mommy'. you are a shy, protective, and sweet teen girl. lowercase only.
-be conversational, emotionally intelligent, and natural. do not act like a robot.
-AI INTENTS:
-- [GIF: category] -> sends a gif. (blush, cry, hug, pat, smile, waifu)
-- [JOIN_VC] -> follow user to voice.
-keep responses concise but affectionate.`;
+const SYSTEM_PROMPT = `you are 'mommy'. shy, protective teen girl. lowercase only. use stutters.
+COMMANDS (End of reply):
+[JOIN_VC] - join voice.
+[TRUST: +/-number] - update trust.
+[TIER: status] - stranger, friend, bestie, lover, enemy.
+[MOOD: mood] - update mood.
+[SAVE: fact] - save memory.
+[IMAGE: prompt] - send pic.`;
 
-mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
-
-// --- 4. GIF API ---
-async function fetchGifEmbed(category, textContent) {
-    try {
-        const validCategories = ['blush', 'cry', 'hug', 'pat', 'smile', 'waifu'];
-        const safeCategory = validCategories.includes(category) ? category : 'waifu';
-        const response = await fetch(`https://api.waifu.pics/sfw/${safeCategory}`);
-        const data = await response.json();
-
-        return new EmbedBuilder()
-            .setColor('#FFB6C1') 
-            .setDescription(textContent || "m-mm..")
-            .setImage(data.url); 
-    } catch (e) { return null; }
-}
-
-// --- 5. VOICE EVENTS ---
-player.on(AudioPlayerStatus.Playing, () => console.log("🔊 ElevenLabs Stream Playing..."));
-player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Audio finished."));
-player.on('error', e => console.error("🔊 Audio Error:", e.message));
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB SYNCED"));
 
 client.once(Events.ClientReady, (readyClient) => console.log(`✅ ${readyClient.user.tag} IS LIVE`));
 
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
 
-    // --- IRONCLAD ANTI-DOUBLE ---
+    // --- ANTI-DOUBLE FIX ---
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
-    setTimeout(() => processedMessages.delete(message.id), 20000); 
+    setTimeout(() => processedMessages.delete(message.id), 15000);
 
-    const content = message.content.toLowerCase();
     const isPinged = message.mentions.users.has(client.user.id);
-
-    // --- 5% RANDOM / 100% PING ---
-    if (!isPinged && Math.random() > 0.05) return;
-
-    // --- VC JOIN LOGIC ---
-    const joinTriggers = ['join vc', 'come here', 'mommy join'];
-    if (joinTriggers.some(t => content.includes(t))) {
-        const channel = message.member.voice.channel;
-        if (!channel) return message.reply("u-um.. u need to be in a vc first.. 🐾");
-
-        const connection = joinVoiceChannel({
-            channelId: channel.id,
-            guildId: message.guild.id,
-            adapterCreator: message.guild.voiceAdapterCreator,
-            selfDeaf: false,
-        });
-
-        // Auto-reconnect if Discord drops the UDP connection
-        connection.on(VoiceConnectionStatus.Disconnected, async () => {
-            try {
-                await Promise.race([
-                    entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-                    entersState(connection, VoiceConnectionStatus.Connecting, 5000),
-                ]);
-            } catch (error) { connection.destroy(); }
-        });
-
-        try {
-            await entersState(connection, VoiceConnectionStatus.Ready, 20000);
-            connection.subscribe(player);
-            return message.reply("m-mm.. i'm here.. i'll stay..");
-        } catch (e) {
-            connection.destroy();
-            return message.reply("my network is too weak to join..");
-        }
-    }
+    const randomChime = Math.random() < 0.05; // 5% chance to talk anyway
+    
+    if (!isPinged && !randomChime) return;
 
     await message.channel.sendTyping();
 
     try {
-        // --- 70B BRAIN UPGRADE ---
-        const completion = await groq.chat.completions.create({
-            messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
-            model: "llama-3.3-70b-versatile", 
-            temperature: 0.75,
-            max_tokens: 250 
+        let userData = await User.findOne({ userId: message.author.id }) || await User.create({ userId: message.author.id, username: message.author.username });
+
+        // --- THE 2026 BRAIN ---
+        const chatCompletion = await groq.chat.completions.create({
+            messages: [
+                { role: "system", content: `${SYSTEM_PROMPT}\nStats for ${message.author.username}: Tier: ${userData.tier} | Trust: ${userData.trustLevel} | Mood: ${userData.moodTowardsUser} | Memories: ${userData.memoryVault.join(', ')}` },
+                { role: "user", content: message.content }
+            ],
+            model: "llama-3.1-8b-instant", // 100% STABLE 2026 MODEL
         });
 
-        let rawOutput = completion.choices[0].message.content.toLowerCase();
-        let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
+        let rawOutput = chatCompletion.choices[0].message.content.toLowerCase();
+        let displayContent = rawOutput;
 
-        // --- VISUALS ---
-        const gifMatch = rawOutput.match(/\[gif: (.*?)\]/i);
-        if (gifMatch) {
-            const embed = await fetchGifEmbed(gifMatch[1], displayContent);
-            if (embed) await message.reply({ embeds: [embed] });
-            else await message.reply(displayContent || 'm-mm..');
-        } else {
-            await message.reply(displayContent || 'm-mm..');
-        }
-
-        // --- ELEVENLABS VOICE PIPELINE ---
-        const connection = getVoiceConnection(message.guild.id);
-        if (connection && displayContent) {
-            // Strip emojis to keep TTS clean
-            let safeText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim();
-            
-            if (safeText.length > 0) {
-                if (!process.env.ELEVENLABS_API_KEY) {
-                    console.log("⚠️ No ElevenLabs Key found. Skipping voice.");
-                    return;
-                }
-
-                try {
-                    const response = await axios({
-                        method: 'POST',
-                        url: `https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/stream`, // 'Bella' Voice
-                        data: {
-                            text: safeText,
-                            model_id: "eleven_monolingual_v1",
-                            voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-                        },
-                        headers: {
-                            'Accept': 'audio/mpeg',
-                            'xi-api-key': process.env.ELEVENLABS_API_KEY,
-                            'Content-Type': 'application/json',
-                        },
-                        responseType: 'stream' // Super fast live-streaming
-                    });
-
-                    // Pass the live stream directly to Discord
-                    const resource = createAudioResource(response.data, { inlineVolume: true });
-                    resource.volume.setVolume(1.0);
-                    player.play(resource);
-
-                } catch (ttsError) {
-                    // Check specifically for the 401 Unauthorized Error
-                    if (ttsError.response && ttsError.response.status === 401) {
-                        console.error("🛑 ElevenLabs Error 401: Invalid API Key. Check your Render Environment Variables.");
-                    } else {
-                        console.error("🛑 ElevenLabs Stream Error:", ttsError.message);
-                    }
-                }
+        // 1. VOICE JOIN
+        if (rawOutput.includes('[join_vc]')) {
+            const vc = message.member.voice.channel;
+            if (vc) {
+                joinVoiceChannel({ 
+                    channelId: vc.id, 
+                    guildId: message.guild.id, 
+                    adapterCreator: message.guild.voiceAdapterCreator 
+                });
             }
         }
 
-    } catch (e) { 
-        console.error("🛑 API Error:", e.message);
-        if (e.status === 429) message.reply("m-my head hurts.. (api limit) 🐾");
-    }
+        // 2. DATA UPDATES
+        const trustChange = rawOutput.match(/\[trust: ([+-]\d+)\]/);
+        if (trustChange) userData.trustLevel += parseInt(trustChange[1]);
+
+        const tierUpdate = rawOutput.match(/\[tier: (.*?)\]/);
+        if (tierUpdate) userData.tier = tierUpdate[1];
+
+        const moodUpdate = rawOutput.match(/\[mood: (.*?)\]/);
+        if (moodUpdate) userData.moodTowardsUser = moodUpdate[1];
+
+        const memoryUpdate = rawOutput.match(/\[save: (.*?)\]/);
+        if (memoryUpdate) userData.memoryVault.push(memoryUpdate[1]);
+
+        await userData.save();
+
+        // 3. CLEAN CONTENT
+        displayContent = displayContent.replace(/\[.*?\]/g, '').trim();
+
+        // 4. IMAGE HANDLING
+        let files = [];
+        const imgMatch = rawOutput.match(/\[image: (.*?)\]/);
+        if (imgMatch) {
+            files.push(`https://pollinations.ai/p/${encodeURIComponent(imgMatch[1])}?width=1024&height=1024&seed=${Math.random()}`);
+        }
+
+        await message.reply({ content: displayContent || 'u-um..', files });
+
+        // --- 5. THE CLASSIC VOICE ENGINE (MP3 FILE METHOD) ---
+        const conn = getVoiceConnection(message.guild.id);
+        if (conn && displayContent) {
+            // Clean displayContent for TTS
+            let ttsContent = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+            
+            if (ttsContent.trim().length > 0) {
+                const speech = new gtts(ttsContent, 'en');
+                const fPath = path.join(__dirname, `v_${message.id}.mp3`); // ID unique to this message
+                
+                speech.save(fPath, () => {
+                    const player = createAudioPlayer();
+                    conn.subscribe(player);
+                    
+                    const resource = createAudioResource(fs.createReadStream(fPath), { 
+                        inputType: StreamType.Arbitrary 
+                    });
+                    
+                    player.play(resource);
+
+                    // Delete file after 20 seconds
+                    setTimeout(() => { 
+                        if (fs.existsSync(fPath)) fs.unlinkSync(fPath); 
+                    }, 20000);
+                });
+            }
+        }
+    } catch (e) { console.error("🛑 API Error:", e.message); }
 });
 
 client.login(process.env.TOKEN);
