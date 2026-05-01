@@ -2,21 +2,21 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const mongoose = require('mongoose');
-const axios = require('axios'); // <-- NEW: Replaces Google TTS
+const axios = require('axios');
 const Groq = require('groq-sdk');
 const express = require('express');
-const ffmpegPath = require('ffmpeg-static');
+const ffmpegPath = require('ffmpeg-static'); // Forces audio to work on any host
 
-// --- WEB SERVER ---
+// --- 1. WEB SERVER (KEEPS HOST AWAKE) ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
-// --- GLOBAL PLAYER ---
+// --- 2. GLOBAL LOCKS & RESILIENT PLAYER ---
 const processedMessages = new Set(); 
 const player = createAudioPlayer({
     behaviors: {
         noSubscriber: NoSubscriberBehavior.Play,
-        maxMissedFrames: 250, 
+        maxMissedFrames: 250, // Prevents drops on bad internet
     },
 });
 
@@ -30,6 +30,7 @@ const client = new Client({
     ] 
 });
 
+// --- 3. DATABASE ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     memoryVault: { type: Array, default: [] }
@@ -44,7 +45,7 @@ keep responses concise but affectionate.`;
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
 
-// GIF API
+// --- 4. GIF API ---
 async function fetchGifEmbed(category, textContent) {
     try {
         const validCategories = ['blush', 'cry', 'hug', 'pat', 'smile', 'waifu'];
@@ -59,7 +60,7 @@ async function fetchGifEmbed(category, textContent) {
     } catch (e) { return null; }
 }
 
-// --- VOICE EVENTS ---
+// --- 5. VOICE EVENTS ---
 player.on(AudioPlayerStatus.Playing, () => console.log("🔊 ElevenLabs Stream Playing..."));
 player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Audio finished."));
 player.on('error', e => console.error("🔊 Audio Error:", e.message));
@@ -69,6 +70,7 @@ client.once(Events.ClientReady, (readyClient) => console.log(`✅ ${readyClient.
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
 
+    // --- IRONCLAD ANTI-DOUBLE ---
     if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
     setTimeout(() => processedMessages.delete(message.id), 20000); 
@@ -76,9 +78,10 @@ client.on(Events.MessageCreate, async message => {
     const content = message.content.toLowerCase();
     const isPinged = message.mentions.users.has(client.user.id);
 
+    // --- 5% RANDOM / 100% PING ---
     if (!isPinged && Math.random() > 0.05) return;
 
-    // VC JOIN LOGIC
+    // --- VC JOIN LOGIC ---
     const joinTriggers = ['join vc', 'come here', 'mommy join'];
     if (joinTriggers.some(t => content.includes(t))) {
         const channel = message.member.voice.channel;
@@ -91,6 +94,7 @@ client.on(Events.MessageCreate, async message => {
             selfDeaf: false,
         });
 
+        // Auto-reconnect if Discord drops the UDP connection
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
             try {
                 await Promise.race([
@@ -113,6 +117,7 @@ client.on(Events.MessageCreate, async message => {
     await message.channel.sendTyping();
 
     try {
+        // --- 70B BRAIN UPGRADE ---
         const completion = await groq.chat.completions.create({
             messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
             model: "llama-3.3-70b-versatile", 
@@ -123,7 +128,7 @@ client.on(Events.MessageCreate, async message => {
         let rawOutput = completion.choices[0].message.content.toLowerCase();
         let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
 
-        // Visuals
+        // --- VISUALS ---
         const gifMatch = rawOutput.match(/\[gif: (.*?)\]/i);
         if (gifMatch) {
             const embed = await fetchGifEmbed(gifMatch[1], displayContent);
@@ -133,13 +138,18 @@ client.on(Events.MessageCreate, async message => {
             await message.reply(displayContent || 'm-mm..');
         }
 
-        // --- THE ELEVENLABS STREAM FIX ---
+        // --- ELEVENLABS VOICE PIPELINE ---
         const connection = getVoiceConnection(message.guild.id);
         if (connection && displayContent) {
             // Strip emojis to keep TTS clean
             let safeText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim();
             
-            if (safeText.length > 0 && process.env.ELEVENLABS_API_KEY) {
+            if (safeText.length > 0) {
+                if (!process.env.ELEVENLABS_API_KEY) {
+                    console.log("⚠️ No ElevenLabs Key found. Skipping voice.");
+                    return;
+                }
+
                 try {
                     const response = await axios({
                         method: 'POST',
@@ -161,8 +171,14 @@ client.on(Events.MessageCreate, async message => {
                     const resource = createAudioResource(response.data, { inlineVolume: true });
                     resource.volume.setVolume(1.0);
                     player.play(resource);
+
                 } catch (ttsError) {
-                    console.error("🛑 ElevenLabs Error:", ttsError.response?.data || ttsError.message);
+                    // Check specifically for the 401 Unauthorized Error
+                    if (ttsError.response && ttsError.response.status === 401) {
+                        console.error("🛑 ElevenLabs Error 401: Invalid API Key. Check your Render Environment Variables.");
+                    } else {
+                        console.error("🛑 ElevenLabs Stream Error:", ttsError.message);
+                    }
                 }
             }
         }
