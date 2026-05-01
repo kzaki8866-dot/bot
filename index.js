@@ -1,15 +1,17 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, NoSubscriberBehavior } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus, StreamType } = require('@discordjs/voice');
 const mongoose = require('mongoose');
 const gtts = require('gtts');
 const fs = require('fs');
+const path = require('path');
+const ffmpeg = require('ffmpeg-static'); // Uses the static binary you installed
 const Groq = require('groq-sdk');
 const express = require('express');
 
-// --- WEB SERVER (For Render) ---
+// --- WEB SERVER ---
 const app = express();
-app.get('/', (req, res) => res.send('dollhouse is cozy 🎀'));
+app.get('/', (req, res) => res.send('dollhouse is running 🎀'));
 app.listen(process.env.PORT || 8080);
 
 // --- DB SETUP ---
@@ -35,10 +37,10 @@ const SYSTEM_PROMPT = "you are a shy, cute, but vulgar teen comgirl. type in low
 
 // --- DB CONNECTION ---
 if (process.env.MONGO_URI) {
-    mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 Memory Linked")).catch(err => console.error("DB Error:", err));
+    mongoose.connect(process.env.MONGO_URI).catch(err => console.error("DB Error:", err));
 }
 
-client.once('clientReady', () => {
+client.once('ready', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     client.user.setActivity('u sleep.. 🐾', { type: ActivityType.Watching });
 });
@@ -70,7 +72,7 @@ client.on('messageCreate', async message => {
         return message.reply("m-mm.. okay..");
     }
 
-    // 4. CHAT LOGIC
+    // 4. CHAT & VOICE LOGIC
     const isPinged = message.mentions.has(client.user);
     if (!isPinged && Math.random() > 0.10) return;
 
@@ -87,24 +89,30 @@ client.on('messageCreate', async message => {
         });
 
         const aiText = chatCompletion.choices[0].message.content.toLowerCase();
-        
-        // AUTO-NICKNAME (If she likes you)
-        if (aiText.includes("good boy") && message.guild.members.me.permissions.has("ManageNicknames")) {
-            message.member.setNickname("🎀 shy's favorite").catch(() => {});
-        }
-
         await message.reply(aiText);
 
-        // SPEAK IN VC (TTS)
+        // --- FIXED TTS LOGIC FOR RENDER ---
         const connection = require('@discordjs/voice').getVoiceConnection(message.guild.id);
         if (connection) {
             const speech = new gtts(aiText, 'en');
-            const filePath = `./voice.mp3`;
+            const filePath = path.join(__dirname, `voice_${message.author.id}.mp3`);
+            
             speech.save(filePath, () => {
-                const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-                const resource = createAudioResource(fs.createReadStream(filePath));
+                const player = createAudioPlayer({
+                    behaviors: { noSubscriber: NoSubscriberBehavior.Play }
+                });
+
+                // This part forces the use of the FFmpeg we installed
+                const resource = createAudioResource(fs.createReadStream(filePath), {
+                    inputType: StreamType.Arbitrary,
+                    inlineVolume: true
+                });
+
                 connection.subscribe(player);
                 player.play(resource);
+                
+                // Cleanup file after 30 seconds to save space on your low-end PC
+                setTimeout(() => { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); }, 30000);
             });
         }
     } catch (e) { console.error(e); }
