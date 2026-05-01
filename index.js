@@ -2,23 +2,21 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const mongoose = require('mongoose');
-const googleTTS = require('google-tts-api');
+const axios = require('axios'); // <-- NEW: Replaces Google TTS
 const Groq = require('groq-sdk');
 const express = require('express');
-const ffmpegPath = require('ffmpeg-static'); // THE MISSING ENGINE
+const ffmpegPath = require('ffmpeg-static');
 
-// --- 1. WEB SERVER ---
+// --- WEB SERVER ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
-// --- 2. GLOBAL LOCKS & RESILIENT PLAYER ---
+// --- GLOBAL PLAYER ---
 const processedMessages = new Set(); 
-
-// New Player Method: Tells the player to keep playing even if the stream lags
 const player = createAudioPlayer({
     behaviors: {
         noSubscriber: NoSubscriberBehavior.Play,
-        maxMissedFrames: 250, // Prevents drops on bad internet
+        maxMissedFrames: 250, 
     },
 });
 
@@ -37,11 +35,12 @@ const User = mongoose.model('User', new mongoose.Schema({
     memoryVault: { type: Array, default: [] }
 }));
 
-const SYSTEM_PROMPT = `you are 'mommy'. shy, protective teen girl. lowercase only.
+const SYSTEM_PROMPT = `you are 'mommy'. you are a shy, protective, and sweet teen girl. lowercase only.
+be conversational, emotionally intelligent, and natural. do not act like a robot.
 AI INTENTS:
 - [GIF: category] -> sends a gif. (blush, cry, hug, pat, smile, waifu)
 - [JOIN_VC] -> follow user to voice.
-keep responses short to save energy.`;
+keep responses concise but affectionate.`;
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
 
@@ -57,15 +56,13 @@ async function fetchGifEmbed(category, textContent) {
             .setColor('#FFB6C1') 
             .setDescription(textContent || "m-mm..")
             .setImage(data.url); 
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-// --- 3. UPGRADED VOICE EVENTS ---
-player.on(AudioPlayerStatus.Playing, () => console.log("🔊 Mommy is actively speaking!"));
-player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Mommy went quiet."));
-player.on('error', e => console.error("🔊 Audio Stream Crash:", e.message));
+// --- VOICE EVENTS ---
+player.on(AudioPlayerStatus.Playing, () => console.log("🔊 ElevenLabs Stream Playing..."));
+player.on(AudioPlayerStatus.Idle, () => console.log("🔊 Audio finished."));
+player.on('error', e => console.error("🔊 Audio Error:", e.message));
 
 client.once(Events.ClientReady, (readyClient) => console.log(`✅ ${readyClient.user.tag} IS LIVE`));
 
@@ -81,7 +78,7 @@ client.on(Events.MessageCreate, async message => {
 
     if (!isPinged && Math.random() > 0.05) return;
 
-    // --- 4. THE NEW VC API PIPELINE ---
+    // VC JOIN LOGIC
     const joinTriggers = ['join vc', 'come here', 'mommy join'];
     if (joinTriggers.some(t => content.includes(t))) {
         const channel = message.member.voice.channel;
@@ -94,18 +91,13 @@ client.on(Events.MessageCreate, async message => {
             selfDeaf: false,
         });
 
-        // Track network state changes to prevent invisible drops
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
             try {
                 await Promise.race([
                     entersState(connection, VoiceConnectionStatus.Signalling, 5000),
                     entersState(connection, VoiceConnectionStatus.Connecting, 5000),
                 ]);
-                console.log("🔄 Reconnected to VC automatically.");
-            } catch (error) {
-                console.log("❌ VC Dropped completely. Destroying connection.");
-                connection.destroy();
-            }
+            } catch (error) { connection.destroy(); }
         });
 
         try {
@@ -114,7 +106,7 @@ client.on(Events.MessageCreate, async message => {
             return message.reply("m-mm.. i'm here.. i'll stay..");
         } catch (e) {
             connection.destroy();
-            return message.reply("my network is too weak to join.. discord blocked me..");
+            return message.reply("my network is too weak to join..");
         }
     }
 
@@ -123,9 +115,9 @@ client.on(Events.MessageCreate, async message => {
     try {
         const completion = await groq.chat.completions.create({
             messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
-            model: "llama-3.1-8b-instant",
-            temperature: 0.7,
-            max_tokens: 150 
+            model: "llama-3.3-70b-versatile", 
+            temperature: 0.75,
+            max_tokens: 250 
         });
 
         let rawOutput = completion.choices[0].message.content.toLowerCase();
@@ -141,31 +133,43 @@ client.on(Events.MessageCreate, async message => {
             await message.reply(displayContent || 'm-mm..');
         }
 
-        // --- 5. THE NEW AUDIO RESOURCE BUILDER ---
+        // --- THE ELEVENLABS STREAM FIX ---
         const connection = getVoiceConnection(message.guild.id);
         if (connection && displayContent) {
-            let cleanText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
-            let safeText = cleanText.substring(0, 190);
+            // Strip emojis to keep TTS clean
+            let safeText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim();
             
-            if (safeText.trim() !== '') {
-                const url = googleTTS.getAudioUrl(safeText, { lang: 'en', slow: false });
-                
-                // We explicitly create an inline volume resource. 
-                // This forces Discord to recognize it as a valid, live audio stream.
-                const resource = createAudioResource(url, {
-                    inlineVolume: true,
-                    inputType: null // Lets FFmpeg automatically detect and transcode the MP3
-                });
-                
-                resource.volume.setVolume(1.0);
-                player.play(resource);
+            if (safeText.length > 0 && process.env.ELEVENLABS_API_KEY) {
+                try {
+                    const response = await axios({
+                        method: 'POST',
+                        url: `https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/stream`, // 'Bella' Voice
+                        data: {
+                            text: safeText,
+                            model_id: "eleven_monolingual_v1",
+                            voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+                        },
+                        headers: {
+                            'Accept': 'audio/mpeg',
+                            'xi-api-key': process.env.ELEVENLABS_API_KEY,
+                            'Content-Type': 'application/json',
+                        },
+                        responseType: 'stream' // Super fast live-streaming
+                    });
+
+                    // Pass the live stream directly to Discord
+                    const resource = createAudioResource(response.data, { inlineVolume: true });
+                    resource.volume.setVolume(1.0);
+                    player.play(resource);
+                } catch (ttsError) {
+                    console.error("🛑 ElevenLabs Error:", ttsError.response?.data || ttsError.message);
+                }
             }
         }
 
     } catch (e) { 
         console.error("🛑 API Error:", e.message);
         if (e.status === 429) message.reply("m-my head hurts.. (api limit) 🐾");
-        else message.reply("m-mm.. a system error happened..");
     }
 });
 
