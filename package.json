@@ -1,7 +1,7 @@
 {
-  "name": "llama-discord-bot",
-  "version": "1.0.0",
-  "description": "Casual AI Discord bot using Groq and Llama 3",
+  "name": "llama-discord-bot-v2",
+  "version": "2.0.0",
+  "description": "Situational AI with fixed visuals and voice",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
