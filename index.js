@@ -5,85 +5,86 @@ const mongoose = require('mongoose');
 const gtts = require('gtts');
 const fs = require('fs');
 const path = require('path');
-const ffmpeg = require('ffmpeg-static'); 
 const Groq = require('groq-sdk');
 const express = require('express');
 
-// --- WEB SERVER ---
 const app = express();
-app.listen(process.env.PORT || 8080);
+app.get('/', (req, res) => res.send('dollhouse is open 🎀'));
+app.listen(process.env.PORT || 10000);
 
-// --- DB SETUP ---
-const UserSchema = new mongoose.Schema({
+const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
+    memory: String,
     behaviorScore: { type: Number, default: 0 }
-});
-const User = mongoose.model('User', UserSchema);
+}));
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers]
+    intents: [3276799] // All intents to ensure it sees everything
 });
 
-// --- UPDATED PROMPT: Giving her "Visual" instructions ---
-const SYSTEM_PROMPT = "you are a shy, vulgar teen comgirl. lowercase only. use stutters. you are bipolar. if you feel like sending a pic, use the tag [GENERATE_IMAGE: description]. if you feel like sending a gif, use [GIF: keyword]. speak like an edgy teen.";
+const SYSTEM_PROMPT = "you are a shy, vulgar teen comgirl. lowercase only. use stutters. if you want to send a gif use [GIF: keyword]. if you want to send a pic use [IMAGE: description].";
 
-// --- HELPER: Random GIF Finder (using a public search) ---
-const getGif = (query) => `https://otter.ai/api/v1/gif?query=${encodeURIComponent(query)}&s=${Math.random()}`;
+// --- DATABASE CONNECTION WITH DEBUG ---
+if (process.env.MONGO_URI) {
+    mongoose.connect(process.env.MONGO_URI)
+        .then(() => console.log("🧠 DATABASE CONNECTED SUCCESSFULLY"))
+        .catch(err => console.log("❌ DATABASE ERROR:", err.message));
+} else {
+    console.log("❌ MONGO_URI IS MISSING IN ENVIRONMENT VARIABLES");
+}
 
-if (process.env.MONGO_URI) mongoose.connect(process.env.MONGO_URI).catch(err => console.error(err));
-
-client.once('ready', () => console.log(`✅ ${client.user.tag} is online!`));
-
+client.once('ready', () => {
+    console.log(`✅ ${client.user.tag} is online and quiet...`);
+    client.user.setActivity('u sleep.. 🐾', { type: ActivityType.Watching });
+});
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
+    // Trigger on ping OR 10% random chance
     const isPinged = message.mentions.has(client.user);
-    if (!isPinged && Math.random() > 0.15) return; // 15% chance to talk randomly
+    if (!isPinged && Math.random() > 0.10) return;
 
     await message.channel.sendTyping();
 
     try {
+        let userData = await User.findOne({ userId: message.author.id });
+        if (!userData) userData = await User.create({ userId: message.author.id });
+
         const chatCompletion = await groq.chat.completions.create({
-            messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
+            messages: [
+                { role: "system", content: `${SYSTEM_PROMPT} Context: user behavior score is ${userData.behaviorScore}` },
+                { role: "user", content: message.content }
+            ],
             model: "llama-3.1-8b-instant",
-            temperature: 1.2
         });
 
-        let aiResponse = chatCompletion.choices[0].message.content.toLowerCase();
+        let aiText = chatCompletion.choices[0].message.content.toLowerCase();
         let files = [];
 
-        // 1. Logic for Auto-GIFs
-        if (aiResponse.includes('[gif:')) {
-            const gifQuery = aiResponse.match(/\[gif: (.*?)\]/)?.[1] || 'anime shy';
-            aiResponse = aiResponse.replace(/\[gif:.*?\]/g, '');
-            files.push(`https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNHJtYjR0ZndieXN0eWR4ZndieXN0eWR4ZndieXN0eWR4JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/MDJ9uLGiTLvMo/giphy.gif`); // Fallback cute cat
+        // Simple Image/Gif logic
+        if (aiText.includes('[image:')) {
+            const query = aiText.match(/\[image: (.*?)\]/)?.[1] || 'pink aesthetic';
+            files.push(`https://pollinations.ai/p/${encodeURIComponent(query)}?width=1024&height=1024&seed=${Math.random()}`);
+            aiText = aiText.replace(/\[image:.*?\]/g, '');
         }
 
-        // 2. Logic for Auto-Images
-        if (aiResponse.includes('[generate_image:')) {
-            const imgQuery = aiResponse.match(/\[generate_image: (.*?)\]/)?.[1] || 'pink aesthetic';
-            aiResponse = aiResponse.replace(/\[generate_image:.*?\]/g, '');
-            files.push(`https://pollinations.ai/p/${encodeURIComponent(imgQuery)}?width=1024&height=1024&seed=${Math.random()}`);
-        }
+        await message.reply({ content: aiText || '...', files: files });
 
-        // Send the message + any files she "decided" to create
-        await message.reply({ content: aiResponse || 'm-mm...', files: files });
-
-        // 3. VOICE LOGIC (If in VC)
+        // TTS Logic
         const connection = require('@discordjs/voice').getVoiceConnection(message.guild.id);
-        if (connection && aiResponse) {
-            const speech = new gtts(aiResponse, 'en');
+        if (connection) {
+            const speech = new gtts(aiText, 'en');
             const filePath = path.join(__dirname, `v_${message.author.id}.mp3`);
             speech.save(filePath, () => {
                 const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-                const resource = createAudioResource(fs.createReadStream(filePath), { inputType: StreamType.Arbitrary, inlineVolume: true });
+                const resource = createAudioResource(fs.createReadStream(filePath), { inputType: StreamType.Arbitrary });
                 connection.subscribe(player);
                 player.play(resource);
-                setTimeout(() => { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); }, 30000);
+                setTimeout(() => { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); }, 15000);
             });
         }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error("AI Error:", e); }
 });
 
 client.login(process.env.TOKEN);
