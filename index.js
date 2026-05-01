@@ -6,17 +6,16 @@ const googleTTS = require('google-tts-api');
 const Groq = require('groq-sdk');
 const express = require('express');
 
-// --- 1. WEB SERVER (KEEPS HOST AWAKE) ---
+// --- 1. WEB SERVER ---
 const app = express();
 app.listen(process.env.PORT || 10000);
 
 // --- 2. GLOBAL LOCKS & PLAYER ---
-const processedMessages = new Set(); // Lightning fast anti-double memory
+const processedMessages = new Set(); 
 const player = createAudioPlayer();
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// REQUIRED AI & VOICE INTENTS
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds,
@@ -26,7 +25,7 @@ const client = new Client({
     ] 
 });
 
-// --- 3. SIMPLE STABLE DATABASE ---
+// --- 3. DATABASE ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     memoryVault: { type: Array, default: [] }
@@ -41,21 +40,19 @@ keep responses under 2 sentences to save energy.`;
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
 
-// --- 4. THE SUPER NEW VISUAL METHOD (ANIME GIF API) ---
+// --- 4. WAIFU GIF API (NO FILES NEEDED) ---
 async function fetchGifEmbed(category, textContent) {
     try {
-        // Fallback to 'waifu' if the AI hallucinates a weird category
         const validCategories = ['blush', 'cry', 'hug', 'pat', 'smile', 'waifu'];
         const safeCategory = validCategories.includes(category) ? category : 'waifu';
         
-        // Fetch a real, lightweight GIF URL directly from the API
         const response = await fetch(`https://api.waifu.pics/sfw/${safeCategory}`);
         const data = await response.json();
 
         return new EmbedBuilder()
             .setColor('#FFB6C1') 
             .setDescription(textContent || "m-mm..")
-            .setImage(data.url); // Discord handles the loading perfectly!
+            .setImage(data.url); 
     } catch (e) {
         console.error("GIF API Error:", e);
         return null;
@@ -79,7 +76,7 @@ client.on(Events.MessageCreate, async message => {
     const content = message.content.toLowerCase();
     const isPinged = message.mentions.users.has(client.user.id);
 
-    // --- 7. THE 5% RANDOM / 100% PING RULE ---
+    // --- 7. THE 5% / 100% RULE ---
     if (!isPinged && Math.random() > 0.05) return;
 
     // --- 8. BULLETPROOF VC JOIN ---
@@ -111,10 +108,10 @@ client.on(Events.MessageCreate, async message => {
         let userData = await User.findOne({ userId: message.author.id });
         if (!userData) userData = await User.create({ userId: message.author.id });
 
-        // --- 9. THE MODEL CRASH FIX ---
+        // --- 9. THE MODEL FIX (llama-3.1-8b-instant) ---
         const completion = await groq.chat.completions.create({
             messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
-            model: "llama3-8b-8192", // THE ONLY 100% STABLE MODEL RIGHT NOW
+            model: "llama-3.1-8b-instant", // THE STABLE, LIVE MODEL
             temperature: 0.7,
             max_tokens: 150 
         });
@@ -122,7 +119,7 @@ client.on(Events.MessageCreate, async message => {
         let rawOutput = completion.choices[0].message.content.toLowerCase();
         let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
 
-        // Check for GIF Intent
+        // --- THE GIF SYSTEM ---
         const gifMatch = rawOutput.match(/\[gif: (.*?)\]/i);
         
         if (gifMatch) {
@@ -139,7 +136,7 @@ client.on(Events.MessageCreate, async message => {
         // --- 10. CRASH-PROOF TTS ---
         const connection = getVoiceConnection(message.guild.id);
         if (connection && displayContent) {
-            // Strip emojis/weird characters that crash TTS
+            // Strip emojis so Google TTS doesn't silently crash
             let cleanText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
             let safeText = cleanText.length > 190 ? cleanText.substring(0, 190) + "..." : cleanText;
             
@@ -156,9 +153,11 @@ client.on(Events.MessageCreate, async message => {
     } catch (e) { 
         console.error("🛑 API Error:", e);
         if (e.message?.includes('decommissioned')) {
-            message.reply("my brain is broken.. i need my model updated..");
-        } else {
+            message.reply("my brain is broken.. model missing..");
+        } else if (e.status === 429) {
             message.reply("m-my head hurts.. (api limit reached) 🐾");
+        } else {
+            message.reply("m-mm.. a system error happened..");
         }
     }
 });
