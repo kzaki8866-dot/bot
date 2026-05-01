@@ -1,7 +1,7 @@
 {
-  "name": "llama-human-entity-final",
-  "version": "6.0.0",
-  "description": "DAVE-Compliant AI Entity",
+  "name": "mommy-ai-bot",
+  "version": "7.0.0",
+  "description": "Sentient Human AI Entity",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
