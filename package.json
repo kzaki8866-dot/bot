@@ -1,7 +1,7 @@
 {
-  "name": "llama-discord-bot-v2",
-  "version": "2.0.0",
-  "description": "Situational AI with fixed visuals and voice",
+  "name": "llama-human-entity-v5",
+  "version": "5.0.0",
+  "description": "Elite Human AI with Camera and Anti-Spam",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,12 +9,15 @@
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
     "discord.js": "^14.14.1",
+    "discord-video-stream": "^1.1.2",
+    "ffmpeg-static": "^5.2.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "google-tts-api": "^2.0.2",
     "groq-sdk": "^0.5.0",
     "libsodium-wrappers": "^0.7.13",
     "mongoose": "^8.3.2",
-    "opusscript": "^0.0.8"
+    "opusscript": "^0.0.8",
+    "axios": "^1.6.0"
   }
 }
