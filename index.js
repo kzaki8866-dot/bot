@@ -1,6 +1,6 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, AttachmentBuilder, ActivityType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState } = require('@discordjs/voice');
+const { Client, GatewayIntentBits, AttachmentBuilder, ActivityType, Events } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, getVoiceConnection, VoiceConnectionStatus, entersState, AudioPlayerStatus } = require('@discordjs/voice');
 const mongoose = require('mongoose');
 const googleTTS = require('google-tts-api');
 const Groq = require('groq-sdk');
@@ -8,122 +8,120 @@ const express = require('express');
 
 const app = express();
 app.listen(process.env.PORT || 10000);
+
+// --- ANTI-DOUBLE & STABILITY ---
 const processedMessages = new Set(); 
+const player = createAudioPlayer(); // Global player to prevent memory leaks
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const client = new Client({ intents: [3276799] });
-
-// --- SENTIENT DATABASE ---
-const User = mongoose.model('User', new mongoose.Schema({
-    userId: String,
-    username: String,
-    tier: { type: String, default: "stranger" }, 
-    trustLevel: { type: Number, default: 0 },
-    mood: { type: String, default: "protective" },
-    memoryVault: { type: Array, default: [] }
-}));
-
-const SYSTEM_PROMPT = `you are 'mommy'. you are a shy, protective, and slightly vulgar teen girl. lowercase only.
-FEELINGS & RULES:
-1. you act based on your current MOOD and TRUST level.
-2. [VISUAL: description] -> sends a high-quality photo of u.
-3. [JOIN_VC] -> follow them into voice.
-4. [SAVE: fact] -> remember something about them forever.
-5. [TIER: status] -> update relationship (bestie, mine, stray, enemy).`;
-
-mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 NEURAL LINK: MOMMY ONLINE"));
-
-// --- VISUAL GENERATOR ---
-function generateVisual(query) {
-    const url = `https://pollinations.ai/p/${encodeURIComponent(query)}?width=1024&height=1024&seed=${Math.random()}&nologo=true`;
-    return new AttachmentBuilder(url, { name: 'mommy_snap.jpg' });
-}
-
-client.once('ready', () => {
-    console.log(`✅ ${client.user.tag} is ready to take care of you.`);
-    client.user.setActivity('with your heart', { type: ActivityType.Playing });
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates
+    ] 
 });
 
-client.on('messageCreate', async message => {
-    if (message.author.bot || processedMessages.has(message.id)) return;
+const User = mongoose.model('User', new mongoose.Schema({
+    userId: String,
+    memoryVault: { type: Array, default: [] },
+    mood: { type: String, default: "protective" }
+}));
+
+const SYSTEM_PROMPT = `you are 'mommy'. shy, protective, teen girl. lowercase only.
+- [VISUAL: description] for photos.
+- [JOIN_VC] to follow user.
+- [SAVE: fact] to remember something.`;
+
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB CONNECTED"));
+
+// --- VOICE HANDLERS ---
+player.on(AudioPlayerStatus.Idle, () => console.log("Mommy finished talking."));
+player.on('error', e => console.error("Audio Player Error:", e));
+
+// Updated to Events.ClientReady to fix the deprecation warning
+client.once(Events.ClientReady, (readyClient) => {
+    console.log(`✅ ${readyClient.user.tag} IS LIVE`);
     
-    // ANTI-DOUBLE MSG LOCK
+    // Boot-up message fix
+    const channel = readyClient.channels.cache.find(c => c.type === 0 && c.permissionsFor(readyClient.user).has('SendMessages'));
+    if (channel) {
+        const url = `https://pollinations.ai/p/shy_anime_girl_waking_up?seed=${Math.random()}`;
+        channel.send({ content: "m-mm.. i'm awake.. missed me? 🐾", files: [new AttachmentBuilder(url, { name: 'boot.jpg' })] });
+    }
+});
+
+client.on(Events.MessageCreate, async message => {
+    if (message.author.bot) return;
+
+    // --- FIX: DOUBLE MESSAGE PREVENTION ---
+    if (processedMessages.has(message.id)) return;
     processedMessages.add(message.id);
-    setTimeout(() => processedMessages.delete(message.id), 15000);
+    setTimeout(() => processedMessages.delete(message.id), 30000); // 30s lock
 
     const content = message.content.toLowerCase();
-    
-    // --- THE PING FIX: Only respond to @mommy ---
-    const isMommyPinged = message.mentions.users.has(client.user.id);
+    const isPinged = message.mentions.users.has(client.user.id);
 
-    // --- VC JOIN LOGIC (Universal Match) ---
-    const joinTriggers = ['join vc', 'come here', 'get in vc', 'mommy join'];
+    // --- FIX: VC JOIN & STAY ---
+    const joinTriggers = ['join vc', 'come here', 'mommy join'];
     if (joinTriggers.some(t => content.includes(t))) {
         const channel = message.member.voice.channel;
-        if (channel) {
-            const connection = joinVoiceChannel({
-                channelId: channel.id,
-                guildId: message.guild.id,
-                adapterCreator: message.guild.voiceAdapterCreator,
-            });
-            try {
-                await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-                return message.reply("m-mm.. i'm here. don't go anywhere.. 🐾");
-            } catch (e) {
-                connection.destroy();
-                return message.reply("i can't reach u.. check my permissions..");
-            }
+        if (!channel) return message.reply("u-um.. join a vc first? 🐾");
+
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: message.guild.id,
+            adapterCreator: message.guild.voiceAdapterCreator,
+            selfDeaf: false,
+        });
+
+        try {
+            await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+            connection.subscribe(player);
+            return message.reply("m-mm.. i'm here. i won't leave..");
+        } catch (e) {
+            connection.destroy();
+            return message.reply("i can't connect.. check my perms..");
         }
     }
 
-    // RANDOM CHAT & PING LOGIC
-    if (!isMommyPinged && Math.random() > 0.15) return;
+    if (!isPinged && Math.random() > 0.15) return;
 
     await message.channel.sendTyping();
 
     try {
-        let userData = await User.findOne({ userId: message.author.id }) || await User.create({ userId: message.author.id, username: message.author.username });
-
+        // --- FIX: UPDATED MODEL (llama-3.1-70b-versatile) ---
         const completion = await groq.chat.completions.create({
-            messages: [
-                { role: "system", content: `${SYSTEM_PROMPT} \nUser: ${userData.username} | Tier: ${userData.tier} | Mood: ${userData.mood} \nMemories: ${userData.memoryVault.slice(-3).join(', ')}` },
-                { role: "user", content: message.content }
-            ],
-            model: "llama-3.1-8b-instant",
+            messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: message.content }],
+            model: "llama-3.1-70b-versatile", // Use a stable, high-quality model
+            temperature: 0.7,
         });
 
         let rawOutput = completion.choices[0].message.content.toLowerCase();
-        let files = [];
-
-        // 1. VISUAL INTERCEPTOR (Fixed GIFs/Images)
-        const visualMatch = rawOutput.match(/\[(?:visual|image|gif): (.*?)\]/i);
-        if (visualMatch) files.push(generateVisual(visualMatch[1]));
-
-        // 2. EMOTION & MEMORY UPDATES
-        const moodMatch = rawOutput.match(/\[mood: (.*?)\]/);
-        if (moodMatch) userData.mood = moodMatch[1];
-        
-        const saveMatch = rawOutput.match(/\[save: (.*?)\]/);
-        if (saveMatch) userData.memoryVault.push(saveMatch[1]);
-        
-        const tierMatch = rawOutput.match(/\[tier: (.*?)\]/);
-        if (tierMatch) userData.tier = tierMatch[1];
-        
-        await userData.save();
-
-        // 3. CLEANUP & REPLY
         let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
-        await message.reply({ content: displayContent || 'm-mm..', files });
 
-        // 4. TTS (DAVE SECURE)
-        const conn = getVoiceConnection(message.guild.id);
-        if (conn && displayContent) {
-            const player = createAudioPlayer();
-            conn.subscribe(player);
-            player.play(createAudioResource(googleTTS.getAudioUrl(displayContent, { lang: 'en' })));
+        // VISUAL FIX
+        let files = [];
+        const visualMatch = rawOutput.match(/\[visual: (.*?)\]/i);
+        if (visualMatch) {
+            const imgUrl = `https://pollinations.ai/p/${encodeURIComponent(visualMatch[1])}?seed=${Math.random()}`;
+            files.push(new AttachmentBuilder(imgUrl, { name: 'mommy.jpg' }));
         }
 
-    } catch (e) { console.error("Neural Error:", e); }
+        await message.reply({ content: displayContent || 'm-mm..', files });
+
+        // --- VOICE FIX: PLAY TTS ---
+        const connection = getVoiceConnection(message.guild.id);
+        if (connection && displayContent) {
+            const url = googleTTS.getAudioUrl(displayContent, { lang: 'en', slow: false });
+            player.play(createAudioResource(url));
+        }
+
+    } catch (e) { 
+        console.error("Groq/Neural Error:", e);
+        message.reply("m-my head hurts.. (api error)");
+    }
 });
 
 client.login(process.env.TOKEN);
