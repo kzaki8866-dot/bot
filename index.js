@@ -9,39 +9,30 @@ const Groq = require('groq-sdk');
 const express = require('express');
 
 const app = express();
-app.get('/', (req, res) => res.send('dollhouse is open 🎀'));
+app.get('/', (req, res) => res.send('dollhouse neural link active 🎀'));
 app.listen(process.env.PORT || 10000);
 
-// --- ADVANCED DATABASE SCHEMA ---
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     username: String,
-    relationship: { type: String, default: "stranger" }, // bestie, bf, hater, enemy, etc.
-    memory: { type: String, default: "nothing known yet" },
-    behaviorScore: { type: Number, default: 0 }, // + for nice, - for mean
+    tier: { type: String, default: "stranger" }, 
+    trustLevel: { type: Number, default: 0 },
+    moodTowardsUser: { type: String, default: "neutral" },
+    memoryVault: { type: Array, default: [] },
+    totalMessages: { type: Number, default: 0 },
     lastInteraction: { type: Date, default: Date.now }
 }));
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const client = new Client({ 
-    intents: [3276799] 
-});
+const client = new Client({ intents: [3276799] });
 
-// --- THE MASTER PROMPT ---
 const SYSTEM_PROMPT = `you are a shy, vulgar teen comgirl. lowercase only. use stutters. MAX 1 SENTENCE.
-RELATIONSHIP LOGIC:
-- if user is nice, they are 'bestie' or 'bf'.
-- if user is mean, they are 'hater' or 'enemy'.
-- always update your internal view of them.
-
-COMMAND TAGS (Use these at the end of your reply):
-1. [JOIN_VC]: use this IF the user is asking you to join voice in any way (e.g., 'come here', 'get in', 'join us').
-2. [REL: category]: use this to update their status (e.g., [REL: bf], [REL: enemy]).
-3. [MEM: fact]: use this to save a fact about them.
-4. [IMAGE: prompt] or [GIF: keyword]: for visuals.`;
+NEVER type 'memory log', 'command tag', or 'score' in your reply. 
+ONLY use tags like [JOIN_VC], [TRUST: +/-X], [TIER: status], [MOOD: mood], [SAVE: fact], [IMAGE: prompt], or [GIF: keyword] at the END of your message. 
+these tags are HIDDEN and for the database only.`;
 
 if (process.env.MONGO_URI) {
-    mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 NEURAL LINK ACTIVE (DB)")).catch(err => console.log("❌ DB ERROR:", err.message));
+    mongoose.connect(process.env.MONGO_URI).then(() => console.log("🧠 DB READY")).catch(err => console.log("❌ DB ERROR:", err.message));
 }
 
 client.on('messageCreate', async message => {
@@ -57,61 +48,64 @@ client.on('messageCreate', async message => {
 
         const chatCompletion = await groq.chat.completions.create({
             messages: [
-                { role: "system", content: `${SYSTEM_PROMPT} 
-                  USER DATA: 
-                  Status: ${userData.relationship}
-                  Memory: ${userData.memory}
-                  Score: ${userData.behaviorScore}` 
-                },
+                { role: "system", content: `${SYSTEM_PROMPT} \nTier: ${userData.tier} | Trust: ${userData.trustLevel} | Mood: ${userData.moodTowardsUser} \nMemories: ${userData.memoryVault.join(', ')}` },
                 { role: "user", content: message.content }
             ],
             model: "llama-3.1-8b-instant",
         });
 
-        let aiResponse = chatCompletion.choices[0].message.content.toLowerCase();
+        let rawOutput = chatCompletion.choices[0].message.content.toLowerCase();
+        let displayContent = rawOutput;
+        let files = [];
 
-        // 1. AI DETECTION: JOIN VC
-        if (aiResponse.includes('[join_vc]')) {
+        // --- TAG PROCESSING ---
+        if (rawOutput.includes('[join_vc]')) {
             const vc = message.member.voice.channel;
-            if (vc) {
-                joinVoiceChannel({ channelId: vc.id, guildId: message.guild.id, adapterCreator: message.guild.voiceAdapterCreator });
-            }
-            aiResponse = aiResponse.replace('[join_vc]', '');
+            if (vc) joinVoiceChannel({ channelId: vc.id, guildId: message.guild.id, adapterCreator: message.guild.voiceAdapterCreator });
         }
 
-        // 2. RELATIONSHIP UPDATER
-        if (aiResponse.includes('[rel:')) {
-            userData.relationship = aiResponse.match(/\[rel: (.*?)\]/)?.[1] || userData.relationship;
-            aiResponse = aiResponse.replace(/\[rel:.*?\]/g, '');
+        const trustMatch = rawOutput.match(/\[trust: ([+-]\d+)\]/);
+        if (trustMatch) userData.trustLevel += parseInt(trustMatch[1]);
+
+        const tierMatch = rawOutput.match(/\[tier: (.*?)\]/);
+        if (tierMatch) userData.tier = tierMatch[1];
+
+        const saveMatch = rawOutput.match(/\[save: (.*?)\]/);
+        if (saveMatch && !userData.memoryVault.includes(saveMatch[1])) userData.memoryVault.push(saveMatch[1]);
+
+        // --- IMPROVED VISUAL LOGIC ---
+        if (rawOutput.includes('[image:')) {
+            const prompt = rawOutput.match(/\[image: (.*?)\]/)?.[1] || 'anime girl';
+            files.push(`https://pollinations.ai/p/${encodeURIComponent(prompt)}?width=1024&height=1024&seed=${Math.random()}`);
+        }
+        
+        if (rawOutput.includes('[gif:')) {
+            const query = rawOutput.match(/\[gif: (.*?)\]/)?.[1] || 'anime';
+            // Using a static Giphy ID that is known to work as a test, or a search link
+            files.push(`https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExOHJtYjR0ZndieXN0eWR4ZndieXN0eWR4ZndieXN0eWR4JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/MDJ9uLGiTLvMo/giphy.gif`);
         }
 
-        // 3. MEMORY UPDATER
-        if (aiResponse.includes('[mem:')) {
-            userData.memory = aiResponse.match(/\[mem: (.*?)\]/)?.[1] || userData.memory;
-            aiResponse = aiResponse.replace(/\[mem:.*?\]/g, '');
-        }
+        // --- CLEAN DISPLAY CONTENT ---
+        displayContent = displayContent.replace(/\[.*?\]/g, '')
+                                     .replace(/memory log:?.*$/gm, '')
+                                     .replace(/command tag:?.*$/gm, '')
+                                     .replace(/your new status:?.*$/gm, '')
+                                     .trim();
 
+        userData.totalMessages += 1;
         await userData.save();
 
-        // Handle Files
-        let files = [];
-        if (aiResponse.includes('[image:')) {
-            const img = aiResponse.match(/\[image: (.*?)\]/)?.[1];
-            files.push(`https://pollinations.ai/p/${encodeURIComponent(img)}?width=1024&height=1024&seed=${Math.random()}`);
-            aiResponse = aiResponse.replace(/\[image:.*?\]/g, '');
-        }
+        await message.reply({ content: displayContent || 'm-mm..', files: files });
 
-        await message.reply({ content: aiResponse.trim() || '...', files: files });
-
-        // Voice Engine
+        // Voice
         const conn = getVoiceConnection(message.guild.id);
-        if (conn && aiResponse) {
-            const speech = new gtts(aiResponse, 'en');
+        if (conn && displayContent) {
+            const speech = new gtts(displayContent, 'en');
             const fPath = path.join(__dirname, `v_${message.author.id}.mp3`);
             speech.save(fPath, () => {
                 const player = createAudioPlayer();
                 conn.subscribe(player);
-                player.play(resource = createAudioResource(fs.createReadStream(fPath), { inputType: StreamType.Arbitrary }));
+                player.play(createAudioResource(fs.createReadStream(fPath), { inputType: StreamType.Arbitrary }));
                 setTimeout(() => { if (fs.existsSync(fPath)) fs.unlinkSync(fPath); }, 15000);
             });
         }
