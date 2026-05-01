@@ -1,7 +1,7 @@
 {
-  "name": "mommy-ai-bot",
-  "version": "7.0.0",
-  "description": "Sentient Human AI Entity",
+  "name": "mommy-ai-lite",
+  "version": "9.0.0",
+  "description": "Ultra-lightweight Sentient AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
