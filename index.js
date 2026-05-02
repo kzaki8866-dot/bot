@@ -65,7 +65,7 @@ client.on(Events.MessageCreate, async message => {
                 { role: "system", content: `${SYSTEM_PROMPT}\nStats: Tier: ${userData.tier} | Mood: ${userData.moodTowardsUser}` },
                 { role: "user", content: message.content }
             ],
-            model: "llama-3.1-8b-instant",
+            model: "llama-3.3-70b-versatile",
         });
 
         let rawOutput = chatCompletion.choices[0].message.content.toLowerCase();
@@ -111,5 +111,14 @@ client.on(Events.MessageCreate, async message => {
         }
     } catch (e) { console.error(e); }
 });
+// Inside client.on(Events.MessageCreate...)
+const safeUserInput = `"""${message.content}"""`;
+const app = express();
+app.get('/', (req, res) => res.send('Bot is awake and secure! 🛡️'));
+const port = process.env.PORT || 10000;
+app.listen(port, '0.0.0.0', () => {
+    console.log(`🌐 Web server is alive on port ${port}`);
+});
+
 
 client.login(process.env.TOKEN);
