@@ -112,7 +112,6 @@ client.on(Events.MessageCreate, async message => {
     } catch (e) { console.error(e); }
 });
 // Inside client.on(Events.MessageCreate...)
-const safeUserInput = `"""${message.content}"""`;
 app.get('/', (req, res) => res.send('Bot is awake and secure! 🛡️'));
 const port = process.env.PORT || 10000;
 app.listen(port, '0.0.0.0', () => {
