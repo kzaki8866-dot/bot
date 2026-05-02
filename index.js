@@ -8,8 +8,13 @@ const path = require('path');
 const Groq = require('groq-sdk');
 const express = require('express');
 
+// --- 1. RENDER PORT FIX (Prevents EADDRINUSE and Port Timeouts) ---
 const app = express();
-app.listen(process.env.PORT || 10000);
+app.get('/', (req, res) => res.send('Bot is awake and secure! 🛡️'));
+const port = process.env.PORT || 10000;
+app.listen(port, '0.0.0.0', () => {
+    console.log(`🌐 Web server is alive on port ${port}`);
+});
 
 const processedMessages = new Set(); 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -25,9 +30,9 @@ const client = new Client({
 const User = mongoose.model('User', new mongoose.Schema({
     userId: String,
     username: String,
-    tier: { type: String, default: "stwangew" }, 
+    tier: { type: String, default: "stranger" }, 
     trustLevel: { type: Number, default: 0 },
-    moodTowardsUser: { type: String, default: "sweepy" },
+    moodTowardsUser: { type: String, default: "happy" },
     memoryVault: { type: Array, default: [] }
 }));
 
@@ -60,10 +65,14 @@ client.on(Events.MessageCreate, async message => {
     try {
         let userData = await User.findOne({ userId: message.author.id }) || await User.create({ userId: message.author.id, username: message.author.username });
 
+        // --- 3. PROMPT INJECTION SANDBOX ---
+        // This stops hackers from jailbreaking your bot
+        const safeUserInput = `"""${message.content}"""`;
+
         const chatCompletion = await groq.chat.completions.create({
             messages: [
                 { role: "system", content: `${SYSTEM_PROMPT}\nStats: Tier: ${userData.tier} | Mood: ${userData.moodTowardsUser}` },
-                { role: "user", content: message.content }
+                { role: "user", content: safeUserInput }
             ],
             model: "llama-3.3-70b-versatile",
         });
@@ -86,16 +95,18 @@ client.on(Events.MessageCreate, async message => {
 
         await userData.save();
 
-        let displayContent = rawOutput.replace(/\[.*?\]/g, '').trim();
+        // --- 4. OUTPUT SANITIZATION ---
+        // Strips out the """ if the AI accidentally repeats them
+        let displayContent = rawOutput.replace(/\[.*?\]/g, '').replace(/"""/g, '').trim();
 
         // Send Text
         let files = [];
         const imgMatch = rawOutput.match(/\[image: (.*?)\]/);
         if (imgMatch) files.push(`https://pollinations.ai/p/${encodeURIComponent(imgMatch[1])}?width=1024&height=1024&seed=${Math.random()}`);
         
-        await message.reply({ content: displayContent || 'm-mm.. hungwy..', files });
+        await message.reply({ content: displayContent || '*happy noises*', files });
 
-        // --- THE OLD WORKING gTTS VOICE ---
+        // --- Voice Engine ---
         const conn = getVoiceConnection(message.guild.id);
         if (conn && displayContent) {
             let ttsText = displayContent.replace(/[\u{1F600}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
@@ -111,7 +122,5 @@ client.on(Events.MessageCreate, async message => {
         }
     } catch (e) { console.error(e); }
 });
-
-
 
 client.login(process.env.TOKEN);
