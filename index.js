@@ -111,12 +111,7 @@ client.on(Events.MessageCreate, async message => {
         }
     } catch (e) { console.error(e); }
 });
-// Inside client.on(Events.MessageCreate...)
-app.get('/', (req, res) => res.send('Bot is awake and secure! 🛡️'));
-const port = process.env.PORT || 10000;
-app.listen(port, '0.0.0.0', () => {
-    console.log(`🌐 Web server is alive on port ${port}`);
-});
+
 
 
 client.login(process.env.TOKEN);
