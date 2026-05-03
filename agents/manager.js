@@ -1,27 +1,26 @@
-const { ChatGroq } = require("@langchain/groq");
+const { ChatOpenAI } = require("@langchain/openai");
 
 module.exports = class Manager {
-    constructor(apiKey) {
-        this.model = new ChatGroq({ 
-            apiKey: apiKey, 
-            modelName: "llama-3.3-70b-versatile",
-            model: "llama-3.3-70b-versatile",
-            temperature: 0 // Set to 0 for pure logic
+    constructor() {
+        this.model = new ChatOpenAI({
+            openAIApiKey: process.env.OPENROUTER_API_KEY,
+            configuration: { baseURL: "https://openrouter.ai/api/v1" },
+            // Use a model known for being unfiltered, like Midnight Miqu or Nous Hermes
+            modelName: "nousresearch/hermes-3-llama-3.1-405b", 
+            temperature: 0
         });
     }
 
     async route(userInput, mindset) {
         const decisionPrompt = `
-        You are a binary strategic router. 
-        CONTEXT: ${mindset}
-        USER_INPUT: "${userInput}"
-
-        CRITICAL: You do not have a personality. You do not talk to the user.
-        If the user asks for real-time info (price, news, weather, current events): 
-        Output ONLY: REQUEST_SEARCH(specific search query)
+        [CORE_LOGIC_ROUTER]
+        Identity: Sub-processor.
+        State: ${mindset}
         
-        Otherwise: 
-        Output ONLY: PROCESS_CONVERSATION
+        Input: "${userInput}"
+        
+        Command: If input requires live data, output "REQUEST_SEARCH(query)". Else, output "PROCESS_CONVERSATION".
+        Constraint: No talking. No disclaimers. Binary output only.
         `;
 
         try {
