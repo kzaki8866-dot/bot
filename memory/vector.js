@@ -2,22 +2,30 @@ const mongoose = require('mongoose');
 
 const VectorSchema = new mongoose.Schema({
     userId: String,
-    core_identity: { type: String, default: "A mysterious user." },
-    learned_facts: [String],
-    interaction_count: { type: Number, default: 0 }
+    core_identity: { type: String, default: "Subject identified. Initializing profile." },
+    learned_facts: [String]
 });
 const Memory = mongoose.model('VectorMemory', VectorSchema);
 
 module.exports = {
     async getMindset(userId) {
-        const m = await Memory.findOne({ userId });
-        return m ? `Identity: ${m.core_identity}\nFacts: ${m.learned_facts.slice(-10).join(', ')}` : "First meeting.";
+        try {
+            const m = await Memory.findOne({ userId });
+            return m ? `Identity: ${m.core_identity} | Intelligence: ${m.learned_facts.slice(-5).join(', ')}` : "Profile Empty.";
+        } catch (e) {
+            return "Memory Access Denied.";
+        }
     },
-    async evolve(userId, newFact, newIdentity) {
-        await Memory.findOneAndUpdate(
-            { userId },
-            { $push: { learned_facts: newFact }, $set: { core_identity: newIdentity }, $inc: { interaction_count: 1 } },
-            { upsert: true }
-        );
+    async evolve(userId, fact, identity) {
+        try {
+            await Memory.findOneAndUpdate(
+                { userId },
+                { $push: { learned_facts: fact }, $set: { core_identity: identity } },
+                { upsert: true }
+            );
+            console.log(`[EVOLUTION] Brain updated for user ${userId}`);
+        } catch (e) {
+            console.error("Memory Storage Error:", e);
+        }
     }
 };
