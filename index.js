@@ -76,4 +76,40 @@ bot.on('messageCreate', async (msg) => {
 mongoose.connect(process.env.MONGO_URI).then(() => {
     console.log("🏛️ UNLOCKED COGNITIVE CORE ONLINE");
     bot.login(process.env.TOKEN);
+    def send_to_discord():
+    message_text = entry_box.get() 
+    
+    # 1. The Announce Command
+    if message_text.startswith('/announce '):
+        clean_message = message_text.replace('/announce ', '')
+        final_content = f"📢 **SERVER ANNOUNCEMENT:** {clean_message}"
+        
+    # 2. The exact command you asked for: typing exactly "/sendmessage" sends "hi"
+    elif message_text == '/sendmessage':
+        final_content = "hi"
+
+    # 3. BONUS: A dynamic version. Typing "/sendmessage Hello there!" sends "Hello there!"
+    elif message_text.startswith('/sendmessage '):
+        clean_message = message_text.replace('/sendmessage ', '')
+        final_content = clean_message
+
+    # 4. The Spam Blocker
+    elif message_text.startswith('/spam'):
+        print("Blocked: Spamming violates rate limits!")
+        entry_box.delete(0, tk.END)
+        return
+        
+    # 5. Normal text (no commands)
+    else:
+        final_content = message_text
+
+    # --- Sending the Data ---
+    data = {"content": final_content} 
+    response = requests.post(WEBHOOK_URL, json=data) 
+    
+    if response.status_code == 204:
+        print("Success! Message sent.")
+        entry_box.delete(0, tk.END) 
+    else:
+        print(f"Error: {response.status_code}")
 });
